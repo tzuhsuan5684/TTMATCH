@@ -59,7 +59,6 @@ feature_cols = [c for c in train.columns if c not in target_cols + drop_cols and
 X = train[feature_cols].copy().fillna(0) # 🌟 提前填充 NaN
 
 # 標籤 (y) 是 "下一球" (Shot N+1)
-# 我們使用 groupby().shift(-1) 來獲取下一球的標籤
 y_action = train.groupby('rally_uid')['actionId'].shift(-1)
 y_point = train.groupby('rally_uid')['pointId'].shift(-1)
 
@@ -105,26 +104,30 @@ X_train_server, X_valid_server = X[train_mask], X[valid_mask]
 y_train_server, y_valid_server = y_server[train_mask], y_server[valid_mask]
 
 # =========================================================
-# 5️⃣ 🌟 MODIFICATION (4/6): 獨立特徵選取
+# 5️⃣ 🌟 MODIFICATION (4/6): 獨立特徵選取 (BUG FIX)
 # =========================================================
-def select_features(X, y, top_k=30):
+def select_features(X, y, objective, num_class=None, top_k=30):
     """
+    🌟 BUG FIX:
     使用 XGBoost 先訓練一輪，選出最重要的前 K 個特徵。
-    同時排除方差過低的無效特徵。
-    (注意：X 傳入時已 fillna(0))
+    現在會根據傳入的 'objective' 正確處理二分類或多分類。
     """
     selector = VarianceThreshold(threshold=0.0)
     X_var = selector.fit_transform(X)
     selected_cols = X.columns[selector.get_support()]
 
-    model_tmp = xgb.XGBClassifier(
-        objective="multi:softmax",
-        num_class=len(np.unique(y)),
-        eval_metric="mlogloss",
-        learning_rate=0.1, max_depth=5, n_estimators=100,
-        subsample=0.8, colsample_bytree=0.8,
-        random_state=42, tree_method="hist"
-    )
+    # 🌟 設定模型參數
+    model_params = {
+        "objective": objective,
+        "eval_metric": "mlogloss" if "multi" in objective else "logloss",
+        "learning_rate": 0.1, "max_depth": 5, "n_estimators": 100,
+        "subsample": 0.8, "colsample_bytree": 0.8,
+        "random_state": 42, "tree_method": "hist"
+    }
+    if num_class is not None:
+        model_params["num_class"] = num_class
+
+    model_tmp = xgb.XGBClassifier(**model_params)
     model_tmp.fit(X_var, y)
 
     importances = model_tmp.feature_importances_
@@ -140,7 +143,10 @@ K_FEATURES = 40 # 使用多少個特徵
 
 # --- 為 actionId 選取特徵 ---
 print(f"🧩 為 actionId 選取前 {K_FEATURES} 個特徵...")
-top_features_action = select_features(X_train_action, y_train_action, top_k=K_FEATURES)
+top_features_action = select_features(X_train_action, y_train_action, 
+                                      objective="multi:softmax", 
+                                      num_class=y_action.nunique(), 
+                                      top_k=K_FEATURES)
 X_train_fs_action = X_train_action[top_features_action]
 X_valid_fs_action = X_valid_action[top_features_action]
 X_test_fs_action = X_test[top_features_action]
@@ -148,16 +154,28 @@ print(f"🔥 actionId Top 5: {top_features_action[:5]}")
 
 # --- 為 pointId 選取特徵 ---
 print(f"🧩 為 pointId 選取前 {K_FEATURES} 個特徵...")
-top_features_point = select_features(X_train_point, y_train_point, top_k=K_FEATURES)
+top_features_point = select_features(X_train_point, y_train_point, 
+                                     objective="multi:softmax",
+                                     num_class=y_point.nunique(),
+                                     top_k=K_FEATURES)
 X_train_fs_point = X_train_point[top_features_point]
 X_valid_fs_point = X_valid_point[top_features_point]
 X_test_fs_point = X_test[top_features_point]
 print(f"🔥 pointId Top 5: {top_features_point[:5]}")
 
-# --- 為 serverGetPoint 選取特徵 ---
+# --- 🌟 BUG FIX: 為 serverGetPoint 選取特徵 ---
 print(f"🧩 為 serverGetPoint 選取前 {K_FEATURES} 個特徵...")
-# 暫時使用 y_train_action 的邏輯來選 server, 因為 y_train_server 可能是二分類
-top_features_server = select_features(X_train_server, y_train_server, top_k=K_FEATURES) 
+if y_train_server.nunique() > 2:
+    server_objective = "multi:softmax"
+    server_num_class = y_server.nunique()
+else:
+    server_objective = "binary:logistic"
+    server_num_class = None
+
+top_features_server = select_features(X_train_server, y_train_server,
+                                      objective=server_objective,
+                                      num_class=server_num_class,
+                                      top_k=K_FEATURES)
 X_train_fs_server = X_train_server[top_features_server]
 X_valid_fs_server = X_valid_server[top_features_server]
 X_test_fs_server = X_test[top_features_server]
@@ -165,20 +183,20 @@ print(f"🔥 serverGetPoint Top 5: {top_features_server[:5]}")
 
 
 # =========================================================
-# 5️⃣ XGBoost 訓練函式 (程式碼不變)
+# 5️⃣ XGBoost 訓練函式 (🌟 減少過擬合)
 # =========================================================
 def train_xgb(X_train, y_train, X_valid, y_valid, objective, num_class=None):
     params = {
         "objective": objective,
         "eval_metric": "mlogloss" if "multi" in objective else "logloss",
         "learning_rate": 0.1,
-        "max_depth": 6,
+        "max_depth": 6, # 🌟 從 6 降為 5
         "subsample": 0.8,
         "colsample_bytree": 0.8,
         "n_estimators": 200,
         "random_state": 42,
         "tree_method": "hist",
-        "early_stopping_rounds": 20 
+        "early_stopping_rounds": 30 # 🌟 從 20 增為 30
     }
     if num_class is not None:
         params["num_class"] = num_class
@@ -206,6 +224,7 @@ model_point = train_xgb(X_train_fs_point, y_train_point,
                         objective="multi:softmax", num_class=y_point.nunique())
 
 print("🚀 訓練 serverGetPoint 模型中...")
+# 這裡的邏輯已經是正確的
 if y_server.nunique() > 2:
     print("⚠️ serverGetPoint 發現多於2個類別，使用 multi:softmax")
     model_server = train_xgb(X_train_fs_server, y_train_server,
