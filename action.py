@@ -7,15 +7,40 @@
 🌟 來源：
 - 從 v2 多任務模型重構而來，專注於 actionId 預測。
 - 保留了 v2 的滯後特徵 (prev_1, prev_2, prev_3) 和 score_diff 特徵。
+
+⭐ v3 更新：
+- 整合 RandomizedSearchCV 進行超參數調優。
+- 保留 Group Split (使用 PredefinedSplit)。
+- 整合 class_weight ('balanced') 處理不平衡問題。
+- 整合 Early Stopping 提升搜尋效率。
+
+🐞 Debug 筆記：
+1.  **[最可能的錯誤] UnicodeEncodeError**：
+    如果你的作業系統 (特別是 Windows) 的
+    console（命令提示字元）預設編碼不是 UTF-8，
+    執行 `print("✅ 搜尋完成!")` 
+    這類包含中文的指令時，可能會引發 `UnicodeEncodeError`。
+
+    **解決方法**：
+    在執行此腳本前，先在你的終端機設定環境變數：
+    - (Windows CMD): `set PYTHONIOENCODING=utf-8`
+    - (Windows PowerShell): `$env:PYTHONIOENCODING = "utf-8"`
+    - (Linux/macOS): `export PYTHONIOENCODING=utf-8`
+    然後再執行 `python your_script_name.py`
+
+2.  **[清除] 移除未使用的套件**：
+    移除了 `from tqdm import tqdm`，因為 `RandomizedSearchCV(verbose=2)` 
+    已經提供了足夠的進度顯示。
 """
 
 import pandas as pd
 import numpy as np
 import xgboost as xgb
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, PredefinedSplit
 from sklearn.metrics import f1_score
 from sklearn.feature_selection import VarianceThreshold
-from tqdm import tqdm
+from sklearn.utils.class_weight import compute_sample_weight
+# from tqdm import tqdm  # (Debug) 移除未使用的 import
 import sys
 
 # =========================================================
@@ -46,7 +71,7 @@ def create_features(df):
     # 1. 滯後特徵 (Lag Features)
     lag_cols = ['actionId', 'pointId', 'spinId', 'strengthId', 'positionId']
     
-    print(f"  > 正在建立 N-1, N-2, N-3 滯後特徵...")
+    print(f"   > 正在建立 N-1, N-2, N-3 滯後特徵...")
     for col in lag_cols:
         for n in [1, 2, 3]:
             df_new[f'prev_{n}_{col}'] = df_new.groupby('rally_uid')[col].shift(n)
@@ -61,7 +86,7 @@ def create_features(df):
     return df_new
 
 # =========================================================
-# 3️⃣ 預處理 (簡化版)
+# 3️⃣ 預處理 (無變動)
 # =========================================================
 def preprocess(train_df, test_df):
     """
@@ -83,7 +108,7 @@ def preprocess(train_df, test_df):
     return train_df, test_last_shot, original_max_label
 
 # =========================================================
-# 4️⃣ 建立訓練任務 (N -> N+1) (簡化版)
+# 4️⃣ 建立訓練任務 (N -> N+1) (無變動)
 # =========================================================
 def create_training_data(train_df, feature_cols):
     """
@@ -111,7 +136,7 @@ def create_training_data(train_df, feature_cols):
     return X, y.astype(int), rally_uids_for_split
 
 # =========================================================
-# 5️⃣ 建立無洩漏的驗證集 (Group Split) (簡化版)
+# 5️⃣ 建立無洩漏的驗證集 (Group Split) (無變動)
 # =========================================================
 def create_group_split(X, y, rally_uids):
     """
@@ -130,7 +155,7 @@ def create_group_split(X, y, rally_uids):
     return X_train, X_valid, y_train, y_valid
 
 # =========================================================
-# 6️⃣ 特徵選取 (無變動的核心函式)
+# 6️⃣ 特徵選取 (無變動)
 # =========================================================
 def select_features(X, y, objective, num_class=None, top_k=30):
     """
@@ -164,35 +189,7 @@ def select_features(X, y, objective, num_class=None, top_k=30):
     return top_features
 
 # =========================================================
-# 7️⃣ XGBoost 訓練函式 (無變動)
-# =========================================================
-def train_xgb(X_train, y_train, X_valid, y_valid, objective, num_class):
-    """訓練 XGBoost 模型的通用函式"""
-    params = {
-        "objective": objective,
-        "eval_metric": "mlogloss",
-        "learning_rate": 0.1,
-        "max_depth": 7,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "n_estimators": 200,
-        "random_state": 42,
-        "tree_method": "hist",
-        "early_stopping_rounds": 30,
-        "num_class": num_class
-    }
-
-    model = xgb.XGBClassifier(**params)
-    model.fit(
-        X_train,
-        y_train,
-        eval_set=[(X_valid, y_valid)],
-        verbose=False
-    )
-    return model
-
-# =========================================================
-# 8️⃣ 標籤還原 (無變動的核心函式)
+# 7️⃣ 標籤還原 
 # =========================================================
 def revert_negative(pred, replacement_val):
     """將 max+1 類別轉回 -1"""
@@ -203,9 +200,9 @@ def revert_negative(pred, replacement_val):
     return pred
 
 # =========================================================
-# 9️⃣ 輸出 submission.csv (修改版)
+# 8️⃣ 輸出 submission.csv 
 # =========================================================
-def save_submission(test_last_shot, pred_action, sample_path="sample_submission.csv", output_path="submission_actionId.csv"):
+def save_submission(test_last_shot, pred_action, sample_path="sample_submission.csv", output_path="submission.csv"):
     """
     讀取 sample_submission，僅更新 actionId 欄位後儲存
     """
@@ -241,10 +238,11 @@ def save_submission(test_last_shot, pred_action, sample_path="sample_submission.
 def main():
     # --- 參數設定 ---
     K_FEATURES = 40
+    N_ITER_SEARCH = 25 # RandomizedSearch 的搜尋次數
     TRAIN_PATH = "train.csv"
     TEST_PATH = "test.csv"
     SAMPLE_SUB_PATH = "sample_submission.csv"
-    SUBMISSION_PATH = "submission_actionId.csv"
+    SUBMISSION_PATH = "submission.csv"
 
     # --- 1. 讀取資料 ---
     train, test = load_data(TRAIN_PATH, TEST_PATH)
@@ -269,39 +267,131 @@ def main():
 
     # --- 5. 建立 Group Split ---
     X_train, X_valid, y_train, y_valid = create_group_split(X, y, rally_uids_for_split)
-    
     num_class = y.nunique()
 
     # --- 6. 特徵選取 ---
     print(f"🧩 為 actionId 選取前 {K_FEATURES} 個特徵...")
+    # 注意：特徵選取在 X_train 上進行，以避免過擬合
     top_features = select_features(X_train, y_train, 
-                                     objective="multi:softmax", 
-                                     num_class=num_class, 
-                                     top_k=K_FEATURES)
+                                      objective="multi:softmax", 
+                                      num_class=num_class, 
+                                      top_k=K_FEATURES)
     print(f"🔥 actionId Top 5: {top_features[:5]}")
     
     X_train_fs = X_train[top_features]
     X_valid_fs = X_valid[top_features]
     X_test_fs = X_test[top_features]
 
-    # --- 7. 訓練模型 ---
-    print("\n🚀 訓練 actionId 模型中...")
-    model = train_xgb(X_train_fs, y_train, X_valid_fs, y_valid,
-                      objective="multi:softmax", num_class=num_class)
+    # =========================================================
+    # ⭐ 7. 設定超參數搜尋 (RandomizedSearchCV)
+    # =========================================================
+    print("\n🚀 設定超參數搜尋 (RandomizedSearchCV)...")
 
-    # --- 8. 評估模型 ---
-    print("\n📊 Validation Results:")
-    pred_valid = model.predict(X_valid_fs)
-    f1_action = f1_score(y_valid, pred_valid, average="macro")
-    print(f"actionId Macro F1: {f1_action:.4f}")
+    # 7a. 將訓練集和驗證集合併，以符合 PredefinedSplit 的要求
+    X_search = pd.concat([X_train_fs, X_valid_fs])
+    y_search = pd.concat([y_train, y_valid])
 
-    # --- 9. 產生預測 ---
+    # 7b. 建立 PredefinedSplit
+    # -1 代表訓練集, 0 代表驗證集
+    test_fold = np.zeros(len(X_search))
+    test_fold[:len(X_train_fs)] = -1
+    ps = PredefinedSplit(test_fold)
+
+    # 7c. 為搜尋資料計算 'balanced' 權重
+    print("   > 正在計算 'balanced' 類別權重 (for Search)...")
+    search_weights = compute_sample_weight(
+        class_weight='balanced',
+        y=y_search
+    )
+    
+    # 7d. 為 early stopping 準備 fit_params
+    # **** DEBUG FIX ****
+    # 'early_stopping_rounds' 是 XGBClassifier 的 *constructor* 參數，
+    # 而不是 .fit() 方法的參數 (在 scikit-learn 流程中)。
+    # 我們將把它移至 base_model 的 constructor 中。
+    # .fit() 只需要 eval_set 即可觸發 early stopping。
+    fit_params = {
+        # "early_stopping_rounds": 30, # <-- 錯誤的放置位置
+        "eval_set": [(X_valid_fs, y_valid)],
+        "verbose": False
+    }
+
+    # 檢查 XGBoost 版本是否支援 eval_sample_weight
+    if xgb.__version__ >= "2.0.0":
+        print("   > 偵測到 XGBoost >= 2.0.0，啟用 eval_sample_weight。")
+        valid_weights = compute_sample_weight(class_weight='balanced', y=y_valid)
+        # **** DEBUG FIX ****
+        # 參數名稱應為 'sample_weight_eval_set' 而不是 'eval_sample_weight'
+        fit_params["sample_weight_eval_set"] = [valid_weights]
+    else:
+        print(f"   > 警告: XGBoost 版本 ({xgb.__version__}) 過舊，無法使用 eval_sample_weight。")
+
+    # 7e. 定義參數網格 (param_distributions)
+    param_dist = {
+        'learning_rate': [0.05, 0.1, 0.15, 0.2],
+        'max_depth': [3, 5, 7, 9],
+        'n_estimators': [100, 200, 300, 400],
+        'subsample': [0.7, 0.8, 0.9],
+        'colsample_bytree': [0.7, 0.8, 0.9],
+        'gamma': [0, 0.1, 0.2] # 新增 gamma 參數
+    }
+
+    # 7f. 建立基本模型
+    base_model = xgb.XGBClassifier(
+        objective="multi:softmax",
+        eval_metric="mlogloss",
+        random_state=42,
+        tree_method="hist",
+        num_class=num_class,
+        early_stopping_rounds=30  # <-- DEBUG FIX: 參數應在此處
+    )
+
+    # 7g. 建立 RandomizedSearchCV 物件
+    rand_search = RandomizedSearchCV(
+        estimator=base_model,
+        param_distributions=param_dist,
+        n_iter=N_ITER_SEARCH,  # 搜尋次數
+        scoring='f1_macro',    # 我們的目標指標
+        cv=ps,                 # 使用我們自訂的 (Train/Valid) 切分
+        n_jobs=-1,             # 使用所有 CPU 核心
+        verbose=2,             # 顯示搜尋進度
+        random_state=42
+    )
+
+    # =========================================================
+    # ⭐ 8. 執行搜尋與評估
+    # =========================================================
+    print("\n🚀 開始執行超參數搜尋...")
+    
+    # 將 search_weights 傳遞給 fit
+    rand_search.fit(
+        X_search, 
+        y_search, 
+        sample_weight=search_weights,
+        **fit_params
+    )
+
+    print("\n📊 搜尋完成!")
+    print(f"✅ 最佳參數: {rand_search.best_params_}")
+    print(f"✅ 最佳 F1 Macro (Val): {rand_search.best_score_:.4f}")
+
+    # 取得最佳模型
+    model = rand_search.best_estimator_
+    
+
+    # =========================================================
+    # 9. 產生預測
+    # =========================================================
     print("\n🧮 產生測試預測中...")
     pred_test = model.predict(X_test_fs)
     pred_test_reverted = revert_negative(pred_test, original_max_label)
     
-    # --- 10. 儲存提交檔案 ---
+    # 儲存
     save_submission(test_last_shot, pred_test_reverted, SAMPLE_SUB_PATH, SUBMISSION_PATH)
+    
+    print("\n🎉 流程執行完畢。")
 
 if __name__ == "__main__":
     main()
+
+

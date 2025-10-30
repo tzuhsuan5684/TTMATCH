@@ -13,9 +13,10 @@
 import pandas as pd
 import numpy as np
 import xgboost as xgb
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, PredefinedSplit
 from sklearn.metrics import f1_score, roc_auc_score
 from sklearn.feature_selection import VarianceThreshold
+from sklearn.utils.class_weight import compute_sample_weight
 from tqdm import tqdm
 import sys
 
@@ -238,11 +239,11 @@ def train_xgb(X_train, y_train, X_valid, y_valid, objective, num_class=None):
     params = {
         "objective": objective,
         "eval_metric": "mlogloss" if "multi" in objective else "logloss",
-        "learning_rate": 0.1,
-        "max_depth": 7, # 遵照前一版修正 (6 -> 5)
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "n_estimators": 200,
+        "learning_rate": 0.05,
+        "max_depth": 9, # 遵照前一版修正 (6 -> 5)
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "n_estimators": 100,
         "random_state": 42,
         "tree_method": "hist",
         "early_stopping_rounds": 30 # 遵照前一版修正 (20 -> 30)
@@ -258,6 +259,103 @@ def train_xgb(X_train, y_train, X_valid, y_valid, objective, num_class=None):
         verbose=False
     )
     return model
+
+def train_xgb_with_search(X_train, X_valid, y_train, y_valid, num_class, top_features, objective="multi:softmax", n_iter=25):
+    """
+    用 RandomizedSearchCV + class_weight + early stopping 訓練 XGBoost 多分類模型
+    """
+    X_train_fs = X_train[top_features]
+    X_valid_fs = X_valid[top_features]
+
+    X_search = pd.concat([X_train_fs, X_valid_fs])
+    y_search = pd.concat([y_train, y_valid])
+
+    test_fold = np.zeros(len(X_search))
+    test_fold[:len(X_train_fs)] = -1
+    ps = PredefinedSplit(test_fold)
+
+    search_weights = compute_sample_weight(class_weight='balanced', y=y_search)
+
+    fit_params = {
+        "eval_set": [(X_valid_fs, y_valid)],
+        "verbose": False
+    }
+    if xgb.__version__ >= "2.0.0":
+        valid_weights = compute_sample_weight(class_weight='balanced', y=y_valid)
+        fit_params["sample_weight_eval_set"] = [valid_weights]
+
+    param_dist = {
+        'learning_rate': [0.05, 0.1, 0.15, 0.2],
+        'max_depth': [3, 5, 7, 9],
+        'n_estimators': [100, 200, 300, 400],
+        'subsample': [0.7, 0.8, 0.9],
+        'colsample_bytree': [0.7, 0.8, 0.9],
+        'gamma': [0, 0.1, 0.2]
+    }
+
+    base_model = xgb.XGBClassifier(
+        objective=objective,
+        eval_metric="mlogloss",
+        random_state=42,
+        tree_method="hist",
+        num_class=num_class,
+        early_stopping_rounds=30
+    )
+
+    rand_search = RandomizedSearchCV(
+        estimator=base_model,
+        param_distributions=param_dist,
+        n_iter=n_iter,
+        scoring='f1_macro',
+        cv=ps,
+        n_jobs=-1,
+        verbose=2,
+        random_state=42
+    )
+
+    rand_search.fit(
+        X_search,
+        y_search,
+        sample_weight=search_weights,
+        **fit_params
+    )
+
+    print(f"✅ {objective} 最佳參數: {rand_search.best_params_}")
+    print(f"✅ {objective} 最佳 F1 Macro (Val): {rand_search.best_score_:.4f}")
+
+    return rand_search.best_estimator_
+
+def select_features_xgb(X, y, num_class, top_k=40, objective="multi:softmax"):
+    selector = VarianceThreshold(threshold=0.0)
+    X_var = selector.fit_transform(X)
+    selected_cols = X.columns[selector.get_support()]
+    X_var = pd.DataFrame(X_var, columns=selected_cols, index=X.index)
+
+    model_params = {
+        "objective": objective,
+        "eval_metric": "mlogloss",
+        "learning_rate": 0.1, "max_depth": 5, "n_estimators": 100,
+        "subsample": 0.8, "colsample_bytree": 0.8,
+        "random_state": 42, "tree_method": "hist",
+        "num_class": num_class
+    }
+    model_tmp = xgb.XGBClassifier(**model_params)
+    model_tmp.fit(X_var, y)
+    importances = model_tmp.feature_importances_
+    importance_df = pd.DataFrame({
+        "feature": selected_cols,
+        "importance": importances
+    }).sort_values("importance", ascending=False)
+    top_features = importance_df.head(top_k)["feature"].tolist()
+    return top_features
+
+def revert_negative_pointid(pred, replacement_val):
+    """將 max+1 類別轉回 -1（for pointId）"""
+    if replacement_val is not None:
+        pred = pd.Series(pred)
+        pred[pred == replacement_val] = -1
+        return pred.values
+    return pred
 
 # =========================================================
 # 8️⃣ 三個模型訓練
@@ -421,7 +519,7 @@ def save_submission(test_last_shot, pred_action, pred_point, pred_server,
 # =========================================================
 def main():
     # --- 參數設定 ---
-    K_FEATURES = 40 # 使用多少個特徵
+    K_FEATURES = 20
     TRAIN_PATH = "train.csv"
     TEST_PATH = "test.csv"
     SAMPLE_SUB_PATH = "sample_submission.csv"
@@ -430,48 +528,74 @@ def main():
     # --- 1. 讀取資料 ---
     train, test = load_data(TRAIN_PATH, TEST_PATH)
 
-    # 🌟 --- 1.5. 特徵工程 (MODIFIED) ---
-    # 在定義 feature_cols 之前執行
+    # --- 2. 特徵工程 ---
     print("⚙️ 正在為 train 建立滯後特徵...")
     train = create_features(train)
     print("⚙️ 正在為 test 建立滯後特徵...")
     test = create_features(test)
 
-    # --- 2. 預處理 ---
-    # 取得特徵欄位
+    # --- 3. 預處理 ---
     target_cols = ["actionId", "pointId", "serverGetPoint"]
-    drop_cols = ["rally_uid", "rally_id"] 
-    # 🌟 'feature_cols' 現在會自動包含我們的新特徵
-    # (例如 'prev_1_actionId', 'prev_2_pointId', 'score_diff')
+    drop_cols = ["rally_uid", "rally_id"]
     feature_cols = [c for c in train.columns if c not in target_cols + drop_cols and c in test.columns]
     print(f"✅ 使用 {len(feature_cols)} 個特徵進行訓練。")
-    
+
     train, test_last_shot, original_max_labels = preprocess(train, test)
 
-    # --- 3. 建立 N -> N+1 訓練資料 ---
+    # --- 4. 建立 N -> N+1 訓練資料 ---
     X, y_action, y_point, y_server, rally_uids_for_split = create_training_data(train, feature_cols)
-    
-    # 填充測試集 (X_test)
-    # 🌟 'X_test' 現在會自動使用 'test_last_shot' 中包含的新特徵
-    X_test = test_last_shot[feature_cols].copy().fillna(0) # 這裡的 fillna(0) 是備用，-1 應已在 create_features 中填好
+    X_test = test_last_shot[feature_cols].copy().fillna(0)
 
-    # --- 4. 建立 Group Split ---
+    # --- 5. 建立 Group Split ---
     split_data, y_all = create_group_split(X, y_action, y_point, y_server, rally_uids_for_split)
 
-    # --- 5. 特徵選取 ---
-    fs_data = apply_feature_selection(split_data, y_all, X_test, K_FEATURES)
+    # --- 5.1 actionId split ---
+    X_train_action, X_valid_action, y_train_action, y_valid_action = split_data['action']
+    num_class_action = y_all[0].nunique()
+    print(f"✅ actionId 類別數量: {num_class_action}")
 
-    # --- 6. 訓練模型 ---
+    # --- 6. 特徵選取 (for actionId) ---
+    print(f"🧩 為 actionId 選取前 {K_FEATURES} 個特徵...")
+    top_features_action = select_features_xgb(X_train_action, y_train_action, num_class_action, top_k=K_FEATURES)
+    print(f"🔥 actionId Top 5: {top_features_action[:5]}")
+
+    # --- 7. 訓練 actionId 模型 (RandomizedSearchCV) ---
+    print("🚀 訓練 actionId 模型 (RandomizedSearchCV)...")
+    actionid_model = train_xgb_with_search(X_train_action, X_valid_action, y_train_action, y_valid_action, num_class_action, top_features_action)
+
+    # --- 5.1 pointId split ---
+    X_train_point, X_valid_point, y_train_point, y_valid_point = split_data['point']
+    num_class_point = y_all[1].nunique()
+    print(f"✅ pointId 類別數量: {num_class_point}")
+
+    # --- 6. 特徵選取 (for pointId) ---
+    print(f"🧩 為 pointId 選取前 {K_FEATURES} 個特徵...")
+    top_features_point = select_features_xgb(X_train_point, y_train_point, num_class_point, top_k=K_FEATURES)
+    print(f"🔥 pointId Top 5: {top_features_point[:5]}")
+
+    # --- 7. 訓練 pointId 模型 (RandomizedSearchCV) ---
+    print("🚀 訓練 pointId 模型 (RandomizedSearchCV)...")
+    pointid_model = train_xgb_with_search(X_train_point, X_valid_point, y_train_point, y_valid_point, num_class_point, top_features_point)
+
+    # --- 8. serverGetPoint 用原本流程（或同樣流程，視需求） ---
+    # 用原本 main.py 的流程
+    fs_data = apply_feature_selection(split_data, y_all, X_test, K_FEATURES)
     models = train_all_models(fs_data, split_data, y_all)
 
-    # --- 7. 評估模型 ---
+    # --- 9. 評估模型 ---
     evaluate_models(models, fs_data, split_data, y_all)
 
-    # --- 8. 產生預測 ---
-    pred_action, pred_point, pred_server = generate_predictions(models, fs_data, y_all, original_max_labels)
+    # --- 10. 產生預測 ---
+    # actionId/serverGetPoint 用原本流程
+    pred_action, _, pred_server = generate_predictions(models, fs_data, y_all, original_max_labels)
 
-    # --- 9. 儲存提交檔案 ---
-    save_submission(test_last_shot, pred_action, pred_point, pred_server, 
+    # pointId 用新模型
+    X_test_point_fs = X_test[top_features_point]
+    pred_point_test = pointid_model.predict(X_test_point_fs)
+    pred_point_test = revert_negative_pointid(pred_point_test, original_max_labels.get("pointId", None))
+
+    # --- 11. 儲存提交檔案 ---
+    save_submission(test_last_shot, pred_action, pred_point_test, pred_server,
                     SAMPLE_SUB_PATH, SUBMISSION_PATH)
 
 if __name__ == "__main__":
