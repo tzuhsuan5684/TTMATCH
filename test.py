@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-🏓 多任務分類模型 (重構版 v2.5) - 主執行檔
+🏓 多任務分類模型 (重構版 v2.6) - 主執行檔
 ---------------------------------------------------------------------
-🌟 v2.5 更新：
-- 新增 `custom_weight_adjustments` 參數。
-- 允許在 'balanced' 權重的基礎上，手動微調特定類別的權重。
+🌟 v2.6 更新：
+- 新增 `log_experiment_results` 函式，將每次運行的分數和參數記錄到 'experiment_log.csv'。
+- 修正 `main()` 函式中的邏輯，確保「評估」和「預測」使用的是同一組模型。
+- 移除 `evaluate_models`、`generate_predictions`、`train_all_models`、`apply_feature_selection`
+  等函式，將其簡化並整合到 `main()` 流程中，以確保邏輯一致性。
 """
 
 import pandas as pd
@@ -15,9 +17,13 @@ import xgboost as xgb
 from sklearn.model_selection import RandomizedSearchCV, PredefinedSplit
 from sklearn.metrics import f1_score, roc_auc_score
 from sklearn.feature_selection import VarianceThreshold
-from sklearn.utils.class_weight import compute_sample_weight # 🌟 還原
-# from imblearn.over_sampling import SMOTE # 移除
+from sklearn.utils.class_weight import compute_sample_weight
 from tqdm import tqdm
+import csv  # 🌟 新增
+import os   # 🌟 新增
+from datetime import datetime # 🌟 新增
+import json # 🌟 新增 (用於記錄字典)
+
 
 # 從 data_processing.py 匯入所有資料處理函式
 from data_processing import (
@@ -54,38 +60,6 @@ def select_features(X, y, objective, num_class=None, top_k=30):
     importance_df = pd.DataFrame({"feature": selected_cols, "importance": importances}).sort_values("importance", ascending=False)
     return importance_df.head(top_k)["feature"].tolist()
 
-def apply_feature_selection(split_data, y_all, X_test, K_FEATURES):
-    """為三個目標分別進行特徵選取"""
-    X_train_action, X_valid_action, y_train_action, _ = split_data['action']
-    X_train_point, X_valid_point, y_train_point, _ = split_data['point']
-    X_train_server, X_valid_server, y_train_server, _ = split_data['server']
-    y_action_all, y_point_all, y_server_all = y_all
-
-    print(f"🧩 為 actionId 選取前 {K_FEATURES} 個特徵...")
-    top_features_action = select_features(X_train_action, y_train_action, objective="multi:softmax", num_class=y_action_all.nunique(), top_k=K_FEATURES)
-    print(f"🔥 actionId Top 5: {top_features_action[:5]}")
-
-    print(f"🧩 為 pointId 選取前 {K_FEATURES} 個特徵...")
-    top_features_point = select_features(X_train_point, y_train_point, objective="multi:softmax", num_class=y_point_all.nunique(), top_k=K_FEATURES)
-    print(f"🔥 pointId Top 5: {top_features_point[:5]}")
-
-    print(f"🧩 為 serverGetPoint 選取前 {K_FEATURES} 個特徵...")
-    server_objective = "multi:softmax" if y_train_server.nunique() > 2 else "binary:logistic"
-    server_num_class = y_server_all.nunique() if y_train_server.nunique() > 2 else None
-    top_features_server = select_features(X_train_server, y_train_server, objective=server_objective, num_class=server_num_class, top_k=K_FEATURES)
-    print(f"🔥 serverGetPoint Top 5: {top_features_server[:5]}")
-
-    # 確保 X_test 也使用對應的特徵子集
-    X_test_action = X_test.reindex(columns=X_train_action.columns, fill_value=0)[top_features_action]
-    X_test_point = X_test.reindex(columns=X_train_point.columns, fill_value=0)[top_features_point]
-    X_test_server = X_test.reindex(columns=X_train_server.columns, fill_value=0)[top_features_server]
-
-    return {
-        'action': (X_train_action[top_features_action], X_valid_action[top_features_action], X_test_action),
-        'point': (X_train_point[top_features_point], X_valid_point[top_features_point], X_test_point),
-        'server': (X_train_server[top_features_server], X_valid_server[top_features_server], X_test_server)
-    }
-
 def select_features_xgb(X, y, num_class, top_k=40, objective="multi:softmax"):
     """與 select_features 類似，但為 RandomizedSearch 流程客製化"""
     selector = VarianceThreshold(threshold=0.0)
@@ -109,7 +83,7 @@ def select_features_xgb(X, y, num_class, top_k=40, objective="multi:softmax"):
 # 7️⃣ XGBoost 訓練函式
 # =========================================================
 def train_xgb(X_train, y_train, X_valid, y_valid, objective, num_class=None):
-    """訓練 XGBoost 模型的通用函式"""
+    """訓練 XGBoost 模型的通用函式（用於 serverGetPoint）"""
     params = {
         "objective": objective, "eval_metric": "mlogloss" if "multi" in objective else "logloss",
         "learning_rate": 0.05, "max_depth": 9, "subsample": 0.9,
@@ -184,64 +158,7 @@ def train_xgb_with_search(X_train, X_valid, y_train, y_valid, num_class, top_fea
     return rand_search.best_estimator_
 
 # =========================================================
-# 8️⃣ 三個模型訓練
-# =========================================================
-def train_all_models(fs_data, split_data, y_all):
-    """使用各自選取的特徵集訓練三個模型"""
-    models = {}
-    _, _, y_train_action, y_valid_action = split_data['action']
-    _, _, y_train_point, y_valid_point = split_data['point']
-    _, _, y_train_server, y_valid_server = split_data['server']
-    X_train_fs_action, X_valid_fs_action, _ = fs_data['action']
-    X_train_fs_point, X_valid_fs_point, _ = fs_data['point']
-    X_train_fs_server, X_valid_fs_server, _ = fs_data['server']
-    y_action_all, y_point_all, y_server_all = y_all
-
-    print("🚀 訓練 actionId 模型中...")
-    models['action'] = train_xgb(X_train_fs_action, y_train_action, X_valid_fs_action, y_valid_action, "multi:softmax", y_action_all.nunique())
-    print("🚀 訓練 pointId 模型中...")
-    models['point'] = train_xgb(X_train_fs_point, y_train_point, X_valid_fs_point, y_valid_point, "multi:softmax", y_point_all.nunique())
-    print("🚀 訓練 serverGetPoint 模型中...")
-    if y_server_all.nunique() > 2:
-        print("⚠️ serverGetPoint 發現多於2個類別，使用 multi:softmax")
-        models['server'] = train_xgb(X_train_fs_server, y_train_server, X_valid_fs_server, y_valid_server, "multi:softmax", y_server_all.nunique())
-    else:
-        # 🌟 這裡也可以加上 sample_weight
-        # 為了保持與 RandomizedSearch 一致，我們可以修改 train_xgb
-        # 但目前為止，我們先保持原狀，因為 'serverGetPoint' 可能是二元且較平衡
-        models['server'] = train_xgb(X_train_fs_server, y_train_server, X_valid_fs_server, y_valid_server, "binary:logistic")
-    return models
-
-# =========================================================
-# 9️⃣ 模型評估
-# =========================================================
-def evaluate_models(models, fs_data, split_data, y_all):
-    """在驗證集上評估模型"""
-    _, _, _, y_valid_action = split_data['action']
-    _, _, _, y_valid_point = split_data['point']
-    _, _, _, y_valid_server = split_data['server']
-    _, X_valid_fs_action, _ = fs_data['action']
-    _, X_valid_fs_point, _ = fs_data['point']
-    _, X_valid_fs_server, _ = fs_data['server']
-    y_server_all = y_all[2]
-    
-    pred_action = models['action'].predict(X_valid_fs_action)
-    pred_point = models['point'].predict(X_valid_fs_point)
-    pred_server_proba = models['server'].predict_proba(X_valid_fs_server)
-    
-    auc_server = roc_auc_score(y_valid_server, pred_server_proba, multi_class="ovr") if y_server_all.nunique() > 2 else roc_auc_score(y_valid_server, pred_server_proba[:, 1])
-    f1_action = f1_score(y_valid_action, pred_action, average="macro")
-    f1_point = f1_score(y_valid_point, pred_point, average="macro")
-    
-    print("\n📊 Validation Results (Fixed):")
-    print(f"actionId Macro F1: {f1_action:.4f}")
-    print(f"pointId  Macro F1: {f1_point:.4f}")
-    print(f"serverGetPoint AUC: {auc_server:.4f}")
-    score = 0.4 * f1_action + 0.4 * f1_point + 0.2 * auc_server
-    print(f"綜合評分: {score:.4f}")
-
-# =========================================================
-# 🔟 測試集預測 & 標籤還原
+# 1️⃣1️⃣ 輸出 submission.csv
 # =========================================================
 def revert_negative(pred, col_name, original_max_labels_dict):
     """將 max+1 類別轉回 -1"""
@@ -252,27 +169,6 @@ def revert_negative(pred, col_name, original_max_labels_dict):
         return pred.values
     return pred
 
-def generate_predictions(models, fs_data, y_all, original_max_labels):
-    """產生測試集預測並還原 -1 標籤"""
-    print("\n🧮 產生測試預測中...")
-    _, _, X_test_fs_action = fs_data['action']
-    _, _, X_test_fs_point = fs_data['point']
-    _, _, X_test_fs_server = fs_data['server']
-    y_server_all = y_all[2]
-
-    pred_action_test = models['action'].predict(X_test_fs_action)
-    pred_point_test = models['point'].predict(X_test_fs_point)
-    
-    if y_server_all.nunique() > 2:
-        pred_server_test_labels = models['server'].predict(X_test_fs_server)
-        pred_server_final = revert_negative(pred_server_test_labels, "serverGetPoint", original_max_labels)
-    else:
-        pred_server_final = models['server'].predict_proba(X_test_fs_server)[:, 1]
-
-    pred_action_test = revert_negative(pred_action_test, "actionId", original_max_labels)
-    pred_point_test = revert_negative(pred_point_test, "pointId", original_max_labels)
-    return pred_action_test, pred_point_test, pred_server_final
-
 def revert_negative_pointid(pred, replacement_val):
     """將 max+1 類別轉回 -1（for pointId）"""
     if replacement_val is not None:
@@ -281,9 +177,6 @@ def revert_negative_pointid(pred, replacement_val):
         return pred.values
     return pred
 
-# =========================================================
-# 1️⃣1️⃣ 輸出 submission.csv
-# =========================================================
 def save_submission(test_last_shot, pred_action, pred_point, pred_server, sample_path, output_path):
     """儲存提交檔案"""
     submission = pd.DataFrame({"rally_uid": test_last_shot["rally_uid"], "serverGetPoint": pred_server, "pointId": pred_point, "actionId": pred_action})
@@ -298,11 +191,44 @@ def save_submission(test_last_shot, pred_action, pred_point, pred_server, sample
     print(f"\n✅ 已輸出 {output_path}\nSubmission shape: {submission.shape}\n{submission.head()}")
 
 # =========================================================
-# 🚀 主執行流程
+# 1️⃣2️⃣ 實驗結果紀錄 (🌟 NEW 🌟)
+# =========================================================
+def log_experiment_results(log_path, results_dict):
+    """將單次實驗結果 (字典) 附加到 CSV 檔案中"""
+    try:
+        # 確保字典中的值是可序列化的 (例如, 轉換 None 和 dict)
+        loggable_dict = {}
+        for key, value in results_dict.items():
+            if value is None:
+                loggable_dict[key] = "None"
+            elif isinstance(value, dict):
+                 loggable_dict[key] = json.dumps(value) # 將字典轉為 JSON 字串
+            else:
+                loggable_dict[key] = value
+
+        fieldnames = loggable_dict.keys()
+        file_exists = os.path.isfile(log_path)
+
+        with open(log_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            
+            if not file_exists:
+                writer.writeheader() # 如果檔案不存在，寫入標頭
+            
+            writer.writerow(loggable_dict)
+        print(f"✅ 實驗結果已紀錄至 {log_path}")
+    except Exception as e:
+        print(f"⚠️ 紀錄實驗結果時發生錯誤: {e}")
+
+# =========================================================
+# 🚀 主執行流程 (🌟 重構 🌟)
 # =========================================================
 def main():
     # --- 參數設定 ---
     K_FEATURES = 20
+    N_ITER_SEARCH = 25 # 🌟 方便紀錄 RandomizedSearch 的迭代次數
+    LOG_FILE = "experiment_log.csv" # 🌟 紀錄檔案
+    
     TRAIN_PATH = "train.csv"
     TEST_PATH = "test.csv"
     SAMPLE_SUB_PATH = "sample_submission.csv"
@@ -315,23 +241,18 @@ def main():
     print("⚙️ 正在為 test 建立特徵...")
     test = create_features(test)
 
-    # --- 新增步驟：對齊 One-Hot Encoded 欄位 ---
+    # --- 欄位對齊 ---
     print("🔄 正在對齊 Train 和 Test 的欄位...")
     train_cols = set(train.columns)
     test_cols = set(test.columns)
-
     missing_in_test = list(train_cols - test_cols)
     if missing_in_test:
         for c in missing_in_test:
-            if c.startswith('type_'):
-                test[c] = 0
-
+            if c.startswith('type_'): test[c] = 0
     missing_in_train = list(test_cols - train_cols)
     if missing_in_train:
         for c in missing_in_train:
-            if c.startswith('type_'):
-                train[c] = 0
-
+            if c.startswith('type_'): train[c] = 0
     common_cols = [col for col in train.columns if col in test.columns]
     test = test[common_cols]
     train = train[common_cols + list(train_cols - test_cols)]
@@ -351,85 +272,126 @@ def main():
     X_test = test_last_shot[feature_cols].copy().fillna(0)
     X_test = X_test.reindex(columns=X.columns, fill_value=0)
     split_data, y_all = create_group_split(X, y_action, y_point, y_server, rally_uids_for_split)
+    y_action_all, y_point_all, y_server_all = y_all
 
     # --- 6 & 7. actionId 模型訓練 (RandomizedSearchCV) ---
     X_train_action, X_valid_action, y_train_action, y_valid_action = split_data['action']
-    num_class_action = y_all[0].nunique()
+    num_class_action = y_action_all.nunique()
     print(f"✅ actionId 類別數量: {num_class_action}")
-
     
     print(f"🧩 為 actionId 選取前 {K_FEATURES} 個特徵...")
     top_features_action = select_features_xgb(X_train_action, y_train_action, num_class_action, top_k=K_FEATURES)
     print(f"🔥 actionId Top 5: {top_features_action[:5]}")
 
-    # 🌟 範例：自訂權重調整
-    # 這裡的數字是 "乘數"。 1.0 = 不變, 0.8 = 權重變為80%, 1.5 = 權重變為150%
-    # 假設您想將 '無' (0) 的權重調小，'傳統' (15) 的權重調高
-    action_weight_adjustments = {
-        19: 0.8,  # 將 '無' (0) 的權重調為 'balanced' 權重的 80%
-         # 將 '傳統' (15) 的權重調為 'balanced' 權重的 150%
-        # 其他未指定的類別將保持 'balanced' 的原始權重 (乘數為 1.0)
-    }
+    action_weight_adjustments = { 19: 0.8}
+    # action_weight_adjustments = None
 
     print("🚀 訓練 actionId 模型 (RandomizedSearchCV)...")
     actionid_model = train_xgb_with_search(
         X_train_action, X_valid_action, y_train_action, y_valid_action, 
         num_class_action, top_features_action,
-        custom_weight_adjustments=action_weight_adjustments # <-- 🌟 傳入調整字典
+        n_iter=N_ITER_SEARCH,
+        custom_weight_adjustments=action_weight_adjustments
     )
 
     # --- 6 & 7. pointId 模型訓練 (RandomizedSearchCV) ---
     X_train_point, X_valid_point, y_train_point, y_valid_point = split_data['point']
-    num_class_point = y_all[1].nunique()
+    num_class_point = y_point_all.nunique()
     print(f"✅ pointId 類別數量: {num_class_point}")
-
     
     print(f"🧩 為 pointId 選取前 {K_FEATURES} 個特徵...")
     top_features_point = select_features_xgb(X_train_point, y_train_point, num_class_point, top_k=K_FEATURES)
     print(f"🔥 pointId Top 5: {top_features_point[:5]}")
     
-    # 🌟 範例：pointId 也可以調整
-    # 假設 'pointId' 類別 5 很多，想降低它的權重
-    point_weight_adjustments = {
-        5: 0.7 # 將 'pointId' 5 的權重調為 70%
-    }
-    # 如果您不想調整 pointId，保留 'None' 即可
-    # point_weight_adjustments = None 
+    # point_weight_adjustments = { 5: 0.7 }
+    point_weight_adjustments = None
 
     print("🚀 訓練 pointId 模型 (RandomizedSearchCV)...")
     pointid_model = train_xgb_with_search(
         X_train_point, X_valid_point, y_train_point, y_valid_point, 
         num_class_point, top_features_point,
-        custom_weight_adjustments=point_weight_adjustments # <-- 🌟 傳入調整字典
+        n_iter=N_ITER_SEARCH,
+        custom_weight_adjustments=point_weight_adjustments
     )
 
-    # --- 8. serverGetPoint 使用原流程訓練 ---
-    fs_data = apply_feature_selection(split_data, y_all, X_test, K_FEATURES)
-    models = train_all_models(fs_data, split_data, y_all)
-
-    # --- 9. 評估模型 ---
-    # 🌟 我們應該評估新的模型，而不只是舊的 'models' 字典
-    # 為了簡潔，我們先保留原有的 evaluate_models
-    # 一個好的重構是把 actionid_model 和 pointid_model 放入 'models' 字典
-    evaluate_models(models, fs_data, split_data, y_all)
-
-    # --- 10. 產生預測 ---
-    # serverGetPoint 用原流程模型預測
-    _, _, pred_server = generate_predictions(models, fs_data, y_all, original_max_labels)
+    # --- 8. 僅訓練 serverGetPoint 模型 ---
+    print("🚀 訓練 serverGetPoint 模型中...")
+    X_train_server, X_valid_server, y_train_server, y_valid_server = split_data['server']
     
-    # pointId 用 RandomizedSearch (sample_weight) 的新模型預測
-    X_test_fs_point = X_test.reindex(columns=X_train_point.columns, fill_value=0)[top_features_point]
-    pred_point_test = pointid_model.predict(X_test_fs_point)
-    pred_point_test = revert_negative_pointid(pred_point_test, original_max_labels.get("pointId"))
+    server_objective = "binary:logistic" if y_server_all.nunique() <= 2 else "multi:softmax"
+    server_num_class = y_server_all.nunique() if y_server_all.nunique() > 2 else None
     
-    # actionId 用 RandomizedSearch (sample_weight) 的新模型預續
+    top_features_server = select_features(X_train_server, y_train_server, 
+                                          server_objective, server_num_class, 
+                                          top_k=K_FEATURES)
+    
+    X_train_fs_server = X_train_server[top_features_server]
+    X_valid_fs_server = X_valid_server[top_features_server]
+
+    server_model = train_xgb(X_train_fs_server, y_train_server, X_valid_fs_server, y_valid_server, 
+                             server_objective, server_num_class)
+
+    # --- 9. 評估模型 (使用 *新* 模型) 並紀錄 ---
+    print("\n📊 評估 *最終* 模型...")
+    
+    X_valid_fs_action = X_valid_action[top_features_action]
+    X_valid_fs_point = X_valid_point[top_features_point]
+
+    pred_action_val = actionid_model.predict(X_valid_fs_action)
+    pred_point_val = pointid_model.predict(X_valid_fs_point)
+    
+    if y_server_all.nunique() > 2:
+        pred_server_proba_val = server_model.predict_proba(X_valid_fs_server)
+        auc_server = roc_auc_score(y_valid_server, pred_server_proba_val, multi_class="ovr")
+    else:
+        pred_server_proba_val = server_model.predict_proba(X_valid_fs_server)[:, 1]
+        auc_server = roc_auc_score(y_valid_server, pred_server_proba_val)
+
+    f1_action = f1_score(y_valid_action, pred_action_val, average="macro")
+    f1_point = f1_score(y_valid_point, pred_point_val, average="macro")
+    weighted_score = 0.4 * f1_action + 0.4 * f1_point + 0.2 * auc_server
+    
+    print(f"actionId Macro F1: {f1_action:.4f}")
+    print(f"pointId  Macro F1: {f1_point:.4f}")
+    print(f"serverGetPoint AUC: {auc_server:.4f}")
+    print(f"綜合評分: {weighted_score:.4f}")
+
+    # --- 9.5 紀錄實驗結果 (🌟 NEW 🌟) ---
+    results_to_log = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "f1_action": f"{f1_action:.4f}",
+        "f1_point": f"{f1_point:.4f}",
+        "auc_server": f"{auc_server:.4f}",
+        "weighted_score": f"{weighted_score:.4f}",
+        "weighted_score": f"{weighted_score:4f}",
+        "K_FEATURES": K_FEATURES,
+        "n_iter_search": N_ITER_SEARCH,
+        "action_weights_adj": json.dumps(action_weight_adjustments),
+        "point_weights_adj": json.dumps(point_weight_adjustments)
+    }
+    log_experiment_results(LOG_FILE, results_to_log)
+
+    # --- 10. 產生預測 (使用 *新* 模型) ---
+    print("\n🧮 產生測試預測中...")
     X_test_fs_action = X_test.reindex(columns=X_train_action.columns, fill_value=0)[top_features_action]
-    pred_action_test_resampled = actionid_model.predict(X_test_fs_action)
-    pred_action = revert_negative(pred_action_test_resampled, "actionId", original_max_labels)
+    X_test_fs_point = X_test.reindex(columns=X_train_point.columns, fill_value=0)[top_features_point]
+    X_test_fs_server = X_test.reindex(columns=X_train_server.columns, fill_value=0)[top_features_server]
 
+    pred_action_test_raw = actionid_model.predict(X_test_fs_action)
+    pred_point_test_raw = pointid_model.predict(X_test_fs_point)
+
+    if y_server_all.nunique() > 2:
+        pred_server_test_raw = server_model.predict(X_test_fs_server)
+        pred_server = revert_negative(pred_server_test_raw, "serverGetPoint", original_max_labels)
+    else:
+        pred_server = server_model.predict_proba(X_test_fs_server)[:, 1] # 機率
+
+    # 還原 -1
+    pred_action = revert_negative(pred_action_test_raw, "actionId", original_max_labels)
+    pred_point = revert_negative_pointid(pred_point_test_raw, original_max_labels.get("pointId"))
 
     # --- 11. 儲存提交檔案 ---
-    save_submission(test_last_shot, pred_action, pred_point_test, pred_server, SAMPLE_SUB_PATH, SUBMISSION_PATH)
+    save_submission(test_last_shot, pred_action, pred_point, pred_server, SAMPLE_SUB_PATH, SUBMISSION_PATH)
 
 if __name__ == "__main__":
     main()
