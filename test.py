@@ -2,8 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-🏓 多任務分類模型 (重構版 v2.6) - 主執行檔
+🏓 多任務分類模型 (重構版 v2.7) - 主執行檔
 ---------------------------------------------------------------------
+🌟 v2.7 更新：
+- 新增 `plot_confusion_matrix` 函式，用於評估後繪製並儲存混淆矩陣圖。
+- 在主流程中加入對 actionId 和 pointId 的混淆矩陣生成。
+- 匯入 `matplotlib.pyplot`、`seaborn` 和 `sklearn.metrics.confusion_matrix`。
+
 🌟 v2.6 更新：
 - 新增 `log_experiment_results` 函式，將每次運行的分數和參數記錄到 'experiment_log.csv'。
 - 修正 `main()` 函式中的邏輯，確保「評估」和「預測」使用的是同一組模型。
@@ -15,14 +20,16 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 from sklearn.model_selection import RandomizedSearchCV, PredefinedSplit
-from sklearn.metrics import f1_score, roc_auc_score
+from sklearn.metrics import f1_score, roc_auc_score, confusion_matrix # 🌟 新增 confusion_matrix
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.utils.class_weight import compute_sample_weight
 from tqdm import tqdm
-import csv  # 🌟 新增
-import os   # 🌟 新增
-from datetime import datetime # 🌟 新增
-import json # 🌟 新增 (用於記錄字典)
+import csv
+import os
+from datetime import datetime
+import json
+import matplotlib.pyplot as plt # 🌟 新增
+import seaborn as sns           # 🌟 新增
 
 
 # 從 data_processing.py 匯入所有資料處理函式
@@ -68,7 +75,7 @@ def select_features_xgb(X, y, num_class, top_k=40, objective="multi:softmax"):
     X_var = pd.DataFrame(X_var, columns=selected_cols, index=X.index)
 
     model_params = {
-        "objective": objective, "eval_metric": "mlogloss", "learning_rate": 0.1, 
+        "objective": objective, "eval_metric": "mlogloss", "learning_rate": 0.1,
         "max_depth": 5, "n_estimators": 100, "subsample": 0.8, "colsample_bytree": 0.8,
         "random_state": 42, "tree_method": "hist", "num_class": num_class
     }
@@ -97,37 +104,32 @@ def train_xgb(X_train, y_train, X_valid, y_valid, objective, num_class=None):
     model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], verbose=False)
     return model
 
-def train_xgb_with_search(X_train, X_valid, y_train, y_valid, num_class, top_features, 
+def train_xgb_with_search(X_train, X_valid, y_train, y_valid, num_class, top_features,
                             objective="multi:softmax", n_iter=25,
-                            custom_weight_adjustments=None): # 🌟 新增參數
+                            custom_weight_adjustments=None):
     """
     用 RandomizedSearchCV + class_weight + early stopping 訓練 XGBoost
-    (🌟 還原 class_weight 並加入微調功能)
     """
     X_train_fs, X_valid_fs = X_train[top_features], X_valid[top_features]
     X_search, y_search = pd.concat([X_train_fs, X_valid_fs]), pd.concat([y_train, y_valid])
-    
+
     ps = PredefinedSplit([-1] * len(X_train_fs) + [0] * len(X_valid_fs))
-    
-    # --- 🌟 1. 計算基礎 'balanced' 權重 ---
+
     print("  > 正在使用 'balanced' 自動權重")
     search_weights = compute_sample_weight(class_weight='balanced', y=y_search)
 
-    # --- 🌟 2. 根據 custom_weight_adjustments 進行微調 ---
     if custom_weight_adjustments:
         print(f"  > 正在微調權重: {custom_weight_adjustments}")
-        # 建立一個 DataFrame 以便快速映射標籤
         temp_weights_df = pd.DataFrame({'label': y_search, 'weight': search_weights})
         for label, multiplier in custom_weight_adjustments.items():
             temp_weights_df.loc[temp_weights_df['label'] == label, 'weight'] *= multiplier
         search_weights = temp_weights_df['weight'].values
 
     fit_params = {"eval_set": [(X_valid_fs, y_valid)], "verbose": False}
-    
-    # --- 🌟 3. 同樣邏輯應用於驗證集權重 ---
+
     if xgb.__version__ >= "2.0.0":
         valid_weights = compute_sample_weight(class_weight='balanced', y=y_valid)
-        
+
         if custom_weight_adjustments:
             temp_valid_weights_df = pd.DataFrame({'label': y_valid, 'weight': valid_weights})
             for label, multiplier in custom_weight_adjustments.items():
@@ -142,20 +144,36 @@ def train_xgb_with_search(X_train, X_valid, y_train, y_valid, num_class, top_fea
         'colsample_bytree': [0.7, 0.8, 0.9], 'gamma': [0, 0.1, 0.2]
     }
     base_model = xgb.XGBClassifier(objective=objective, eval_metric="mlogloss", random_state=42, tree_method="hist", num_class=num_class, early_stopping_rounds=30)
-    
+
     rand_search = RandomizedSearchCV(estimator=base_model, param_distributions=param_dist, n_iter=n_iter, scoring='f1_macro', cv=ps, n_jobs=-1, verbose=2, random_state=42)
-    
+
     rand_search.fit(
         X_search,
         y_search,
-        # --- 🌟 使用微調後的權重 ---
         sample_weight=search_weights,
         **fit_params
     )
-    
+
     print(f"✅ {objective} 最佳參數: {rand_search.best_params_}")
     print(f"✅ {objective} 最佳 F1 Macro (Val): {rand_search.best_score_:.4f}")
     return rand_search.best_estimator_
+
+# =========================================================
+# 🌟 1️⃣0️⃣ 繪製混淆矩陣 (NEW)
+# =========================================================
+def plot_confusion_matrix(y_true, y_pred, class_labels, title, filename):
+    """繪製並儲存混淆矩陣圖"""
+    cm = confusion_matrix(y_true, y_pred, labels=class_labels)
+    plt.figure(figsize=(14, 12))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=class_labels, yticklabels=class_labels)
+    plt.title(title, fontsize=16)
+    plt.ylabel('True Label', fontsize=12)
+    plt.xlabel('Predicted Label', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.close() # 關閉圖像以釋放記憶體
+    print(f"✅ 已儲存混淆矩陣圖: {filename}")
 
 # =========================================================
 # 1️⃣1️⃣ 輸出 submission.csv
@@ -191,18 +209,17 @@ def save_submission(test_last_shot, pred_action, pred_point, pred_server, sample
     print(f"\n✅ 已輸出 {output_path}\nSubmission shape: {submission.shape}\n{submission.head()}")
 
 # =========================================================
-# 1️⃣2️⃣ 實驗結果紀錄 (🌟 NEW 🌟)
+# 1️⃣2️⃣ 實驗結果紀錄
 # =========================================================
 def log_experiment_results(log_path, results_dict):
     """將單次實驗結果 (字典) 附加到 CSV 檔案中"""
     try:
-        # 確保字典中的值是可序列化的 (例如, 轉換 None 和 dict)
         loggable_dict = {}
         for key, value in results_dict.items():
             if value is None:
                 loggable_dict[key] = "None"
             elif isinstance(value, dict):
-                 loggable_dict[key] = json.dumps(value) # 將字典轉為 JSON 字串
+                 loggable_dict[key] = json.dumps(value)
             else:
                 loggable_dict[key] = value
 
@@ -211,24 +228,24 @@ def log_experiment_results(log_path, results_dict):
 
         with open(log_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
-            
+
             if not file_exists:
-                writer.writeheader() # 如果檔案不存在，寫入標頭
-            
+                writer.writeheader()
+
             writer.writerow(loggable_dict)
         print(f"✅ 實驗結果已紀錄至 {log_path}")
     except Exception as e:
         print(f"⚠️ 紀錄實驗結果時發生錯誤: {e}")
 
 # =========================================================
-# 🚀 主執行流程 (🌟 重構 🌟)
+# 🚀 主執行流程
 # =========================================================
 def main():
     # --- 參數設定 ---
     K_FEATURES = 20
-    N_ITER_SEARCH = 25 # 🌟 方便紀錄 RandomizedSearch 的迭代次數
-    LOG_FILE = "experiment_log.csv" # 🌟 紀錄檔案
-    
+    N_ITER_SEARCH = 25
+    LOG_FILE = "experiment_log.csv"
+
     TRAIN_PATH = "train.csv"
     TEST_PATH = "test.csv"
     SAMPLE_SUB_PATH = "sample_submission.csv"
@@ -256,15 +273,15 @@ def main():
     common_cols = [col for col in train.columns if col in test.columns]
     test = test[common_cols]
     train = train[common_cols + list(train_cols - test_cols)]
-    
+
     # --- 3. 預處理 ---
     target_cols = ["actionId", "pointId", "serverGetPoint"]
     drop_cols = ["rally_uid", "rally_id", "match", "numberGame"]
     feature_cols = [c for c in train.columns if c not in target_cols + drop_cols and c in test.columns]
     feature_cols = [c for c in feature_cols if pd.api.types.is_numeric_dtype(train[c])]
-    
+
     print(f"✅ 使用 {len(feature_cols)} 個特徵進行訓練。 ('sex' 欄位已保留)")
-    
+
     train, test_last_shot, original_max_labels = preprocess(train, test)
 
     # --- 4. 建立 N -> N+1 訓練資料 & 5. Group Split ---
@@ -278,17 +295,16 @@ def main():
     X_train_action, X_valid_action, y_train_action, y_valid_action = split_data['action']
     num_class_action = y_action_all.nunique()
     print(f"✅ actionId 類別數量: {num_class_action}")
-    
+
     print(f"🧩 為 actionId 選取前 {K_FEATURES} 個特徵...")
     top_features_action = select_features_xgb(X_train_action, y_train_action, num_class_action, top_k=K_FEATURES)
     print(f"🔥 actionId Top 5: {top_features_action[:5]}")
 
-    action_weight_adjustments = { 19: 0.8}
-    # action_weight_adjustments = None
+    action_weight_adjustments = { 19: 1.5}
 
     print("🚀 訓練 actionId 模型 (RandomizedSearchCV)...")
     actionid_model = train_xgb_with_search(
-        X_train_action, X_valid_action, y_train_action, y_valid_action, 
+        X_train_action, X_valid_action, y_train_action, y_valid_action,
         num_class_action, top_features_action,
         n_iter=N_ITER_SEARCH,
         custom_weight_adjustments=action_weight_adjustments
@@ -298,17 +314,16 @@ def main():
     X_train_point, X_valid_point, y_train_point, y_valid_point = split_data['point']
     num_class_point = y_point_all.nunique()
     print(f"✅ pointId 類別數量: {num_class_point}")
-    
+
     print(f"🧩 為 pointId 選取前 {K_FEATURES} 個特徵...")
     top_features_point = select_features_xgb(X_train_point, y_train_point, num_class_point, top_k=K_FEATURES)
     print(f"🔥 pointId Top 5: {top_features_point[:5]}")
-    
-    # point_weight_adjustments = { 5: 0.7 }
+
     point_weight_adjustments = None
 
     print("🚀 訓練 pointId 模型 (RandomizedSearchCV)...")
     pointid_model = train_xgb_with_search(
-        X_train_point, X_valid_point, y_train_point, y_valid_point, 
+        X_train_point, X_valid_point, y_train_point, y_valid_point,
         num_class_point, top_features_point,
         n_iter=N_ITER_SEARCH,
         custom_weight_adjustments=point_weight_adjustments
@@ -317,29 +332,29 @@ def main():
     # --- 8. 僅訓練 serverGetPoint 模型 ---
     print("🚀 訓練 serverGetPoint 模型中...")
     X_train_server, X_valid_server, y_train_server, y_valid_server = split_data['server']
-    
+
     server_objective = "binary:logistic" if y_server_all.nunique() <= 2 else "multi:softmax"
     server_num_class = y_server_all.nunique() if y_server_all.nunique() > 2 else None
-    
-    top_features_server = select_features(X_train_server, y_train_server, 
-                                          server_objective, server_num_class, 
+
+    top_features_server = select_features(X_train_server, y_train_server,
+                                          server_objective, server_num_class,
                                           top_k=K_FEATURES)
-    
+
     X_train_fs_server = X_train_server[top_features_server]
     X_valid_fs_server = X_valid_server[top_features_server]
 
-    server_model = train_xgb(X_train_fs_server, y_train_server, X_valid_fs_server, y_valid_server, 
+    server_model = train_xgb(X_train_fs_server, y_train_server, X_valid_fs_server, y_valid_server,
                              server_objective, server_num_class)
 
-    # --- 9. 評估模型 (使用 *新* 模型) 並紀錄 ---
+    # --- 9. 評估模型 並紀錄 ---
     print("\n📊 評估 *最終* 模型...")
-    
+
     X_valid_fs_action = X_valid_action[top_features_action]
     X_valid_fs_point = X_valid_point[top_features_point]
 
     pred_action_val = actionid_model.predict(X_valid_fs_action)
     pred_point_val = pointid_model.predict(X_valid_fs_point)
-    
+
     if y_server_all.nunique() > 2:
         pred_server_proba_val = server_model.predict_proba(X_valid_fs_server)
         auc_server = roc_auc_score(y_valid_server, pred_server_proba_val, multi_class="ovr")
@@ -350,20 +365,35 @@ def main():
     f1_action = f1_score(y_valid_action, pred_action_val, average="macro")
     f1_point = f1_score(y_valid_point, pred_point_val, average="macro")
     weighted_score = 0.4 * f1_action + 0.4 * f1_point + 0.2 * auc_server
-    
+
     print(f"actionId Macro F1: {f1_action:.4f}")
     print(f"pointId  Macro F1: {f1_point:.4f}")
     print(f"serverGetPoint AUC: {auc_server:.4f}")
     print(f"綜合評分: {weighted_score:.4f}")
 
-    # --- 9.5 紀錄實驗結果 (🌟 NEW 🌟) ---
+    # --- 🌟 9.1 繪製並儲存混淆矩陣 (NEW) ---
+    print("\n🎨 正在產生混淆矩陣圖...")
+    # 取得 actionId 的所有類別標籤並排序
+    action_labels = sorted(y_action_all.unique())
+    plot_confusion_matrix(y_valid_action, pred_action_val,
+                          class_labels=action_labels,
+                          title='ActionID Confusion Matrix (Validation Set)',
+                          filename='confusion_matrix_action.png')
+
+    # 取得 pointId 的所有類別標籤並排序
+    point_labels = sorted(y_point_all.unique())
+    plot_confusion_matrix(y_valid_point, pred_point_val,
+                          class_labels=point_labels,
+                          title='PointID Confusion Matrix (Validation Set)',
+                          filename='confusion_matrix_point.png')
+
+    # --- 9.5 紀錄實驗結果 ---
     results_to_log = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "f1_action": f"{f1_action:.4f}",
         "f1_point": f"{f1_point:.4f}",
         "auc_server": f"{auc_server:.4f}",
         "weighted_score": f"{weighted_score:.4f}",
-        "weighted_score": f"{weighted_score:4f}",
         "K_FEATURES": K_FEATURES,
         "n_iter_search": N_ITER_SEARCH,
         "action_weights_adj": json.dumps(action_weight_adjustments),
@@ -371,7 +401,7 @@ def main():
     }
     log_experiment_results(LOG_FILE, results_to_log)
 
-    # --- 10. 產生預測 (使用 *新* 模型) ---
+    # --- 10. 產生預測 ---
     print("\n🧮 產生測試預測中...")
     X_test_fs_action = X_test.reindex(columns=X_train_action.columns, fill_value=0)[top_features_action]
     X_test_fs_point = X_test.reindex(columns=X_train_point.columns, fill_value=0)[top_features_point]
@@ -395,4 +425,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
