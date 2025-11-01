@@ -27,7 +27,7 @@ categorical_features = [
     'actionId', 'pointId', 'serverGetPoint', # 目標欄位 (同時也是特徵)
     'handId', 'strengthId', 'positionId', 'let',
     'PlayerId', 'PlayerServed', 'server', 'set', 'game',
-    'strickNum', 'scoreSelf', 'scoreBlue' # 假設 'strickNum' 等也視為分類
+    'strickNumber', 'scoreSelf', 'scoreOther' # 假設 'strickNum' 等也視為分類
 ]
 
 # 過濾掉 'train.csv' 中可能不存在的欄位
@@ -58,7 +58,7 @@ target_encoders = {col: encoders[col] for col in target_cols if col in encoders}
 # =========================================================
 X_list, Y_list = [], []
 for _, g in df.groupby(['match', 'rally_id']):
-    g = g.sort_values('strickNum')
+    g = g.sort_values('strickNumber')
     
     # 提取所有 "feature_cols" 定義的特徵
     all_feats_array = g[feature_cols].values
