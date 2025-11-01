@@ -9,11 +9,16 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.metrics import F1Score, AUC
 
+import wandb
+from wandb.integration.keras import WandbModelCheckpoint
+from tensorflow.keras.callbacks import LambdaCallback 
+
 # =========================================================
 # 1️⃣ 讀取資料 (‼️ 已修正：移除數值特徵處理)
 # =========================================================
 CSV_PATH = "train.csv"
 MAX_SEQ_LEN = 10  # padding 上限
+
 
 df = pd.read_csv(CSV_PATH)
 
@@ -24,7 +29,7 @@ target_cols = ['actionId', 'pointId', 'serverGetPoint']
 # (您可以自行增減)
 # ‼️ 假設所有特徵均為分類
 categorical_features = [
-    'actionId', 'pointId', 'serverGetPoint', # 目標欄位 (同時也是特徵)
+    'sex', 'actionId', 'pointId', 'serverGetPoint', # 目標欄位 (同時也是特徵)
     'handId', 'strengthId', 'positionId', 'let',
     'PlayerId', 'PlayerServed', 'server', 'set', 'game',
     'strickNumber', 'scoreSelf', 'scoreOther' # 假設 'strickNum' 等也視為分類
@@ -110,6 +115,19 @@ server_out = Dense(num_server, activation='softmax', name='serverGetPoint')(x)
 model = Model(inputs=inputs, outputs=[action_out, point_out, server_out])
 model.summary() # 建議檢查 summary，確認模型架構
 
+wandb.init(
+    project="TTMATCH-prediction", 
+    job_type="train",
+    config={
+        "max_seq_len": MAX_SEQ_LEN,
+        "lstm_units": 128,
+        "dropout": 0.3,
+        "learning_rate": 1e-3,
+        "epochs": 20,
+        "batch_size": 64
+    }
+)
+
 # =========================================================
 # 4️⃣ 編譯與訓練 (這部分程式碼完全不用動)
 # =========================================================
@@ -127,14 +145,26 @@ model.compile(
     }
 )
 
+wandb_callbacks = [
+    LambdaCallback(on_epoch_end=lambda epoch, logs: wandb.log(logs)),
+    WandbModelCheckpoint(
+        filepath=f"wandb-run-{wandb.run.id}-best-model.keras", 
+        monitor='val_loss', 
+        save_best_only=True,
+        mode='min'
+    )
+]
+
 history = model.fit(
     X_train,
     {'actionId': y_action_train, 'pointId': y_point_train, 'serverGetPoint': y_server_train},
     validation_data=(X_val, {'actionId': y_action_val, 'pointId': y_point_val, 'serverGetPoint': y_server_val}),
     epochs=20,
     batch_size=64,
-    verbose=1
+    verbose=1,
+    callbacks=wandb_callbacks  # ✅ 別忘了這一行！
 )
+
 
 # =========================================================
 # 5️⃣ 推論測試 與 顯示最終指標 (‼️ 已修正)
@@ -167,4 +197,9 @@ print(f"Final Validation F1-Score (pointId):  {f1_point:.4f}")
 auc_server = final_epoch_metrics['val_serverGetPoint_auc_server'][-1]
 print(f"Final Validation AUC (serverGetPoint): {auc_server:.4f}")
 
+wandb.summary["final_val_f1_action"] = f1_action
+wandb.summary["final_val_f1_point"] = f1_point
+wandb.summary["final_val_auc_server"] = auc_server
+
+wandb.finish()
 
