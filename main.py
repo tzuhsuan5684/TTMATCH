@@ -2,23 +2,32 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.model_selection import train_test_split
+
+import tensorflow as tf # ❇️ 新增
+import tensorflow.keras.backend as K # ❇️ 新增
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, Masking
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.metrics import F1Score, AUC
+import pickle
 
 import wandb
 from wandb.integration.keras import WandbModelCheckpoint
 from tensorflow.keras.callbacks import LambdaCallback 
+
+# ❇️ --- 新增混淆矩陣需要的函式庫 ---
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
+# ❇️ --- 結束 ---
 
 # =========================================================
 # 1️⃣ 讀取資料 (‼️ 已修正：移除數值特徵處理)
 # =========================================================
 CSV_PATH = "train.csv"
 MAX_SEQ_LEN = 10  # padding 上限
-
 
 df = pd.read_csv(CSV_PATH)
 
@@ -115,27 +124,68 @@ server_out = Dense(num_server, activation='softmax', name='serverGetPoint')(x)
 model = Model(inputs=inputs, outputs=[action_out, point_out, server_out])
 model.summary() # 建議檢查 summary，確認模型架構
 
+EPOCH=10
+BATCH_SIZE=64
+DROPOUT=0.3
+learning_rate=1e-3
+
+
 wandb.init(
     project="TTMATCH-prediction", 
     job_type="train",
     config={
         "max_seq_len": MAX_SEQ_LEN,
         "lstm_units": 128,
-        "dropout": 0.3,
-        "learning_rate": 1e-3,
-        "epochs": 20,
-        "batch_size": 64
+        "dropout": DROPOUT,
+        "learning_rate": learning_rate,
+        "epochs": EPOCH,
+        "batch_size": BATCH_SIZE,
+        "loss_action": "focal_loss", # ❇️ (可選) 在 config 中註記
+        "loss_point": "focal_loss"  # ❇️ (可選) 在 config 中註記
     }
 )
 
 # =========================================================
-# 4️⃣ 編譯與訓練 (這部分程式碼完全不用動)
+# ❇️ 4️⃣-1：定義 Focal Loss
+# =========================================================
+def categorical_focal_loss(gamma=2.0, alpha=0.25):
+    """
+    Implementation of Categorical Focal Loss.
+    """
+    def focal_loss(y_true, y_pred):
+        # Clip predictions to avoid log(0)
+        epsilon = K.epsilon()
+        y_pred = K.clip(y_pred, epsilon, 1. - epsilon)
+        
+        # Calculate Categorical Crossentropy
+        cross_entropy = -y_true * K.log(y_pred)
+        
+        # Calculate the modulating factor (1-y_pred)^gamma
+        modulating_factor = K.pow(1.0 - y_pred, gamma)
+        
+        # Apply alpha
+        alpha_factor = alpha
+        
+        # Calculate the final focal loss
+        # We multiply by y_true to select only the loss for the true class
+        focal_loss = alpha_factor * modulating_factor * cross_entropy
+        
+        # Sum over classes, mean over batch
+        return K.mean(K.sum(focal_loss, axis=-1))
+
+    return focal_loss
+
+
+# =========================================================
+# 4️⃣-2：編譯與訓練 (❇️ 已修改 loss)
 # =========================================================
 model.compile(
-    optimizer=Adam(1e-3),
+    optimizer=Adam(learning_rate=learning_rate),
     loss={
-        'actionId': 'categorical_crossentropy',
-        'pointId': 'categorical_crossentropy',
+        # ❇️ 修改：使用 Focal Loss，並傳入超參數
+        'actionId': categorical_focal_loss(gamma=2.0, alpha=0.25),
+        'pointId': categorical_focal_loss(gamma=2.0, alpha=0.25),
+        # ❇️ 不變：serverGetPoint 仍使用標準交叉熵
         'serverGetPoint': 'categorical_crossentropy'
     },
     metrics={
@@ -159,22 +209,118 @@ history = model.fit(
     X_train,
     {'actionId': y_action_train, 'pointId': y_point_train, 'serverGetPoint': y_server_train},
     validation_data=(X_val, {'actionId': y_action_val, 'pointId': y_point_val, 'serverGetPoint': y_server_val}),
-    epochs=20,
-    batch_size=64,
+    epochs=EPOCH,
+    batch_size=BATCH_SIZE,
     verbose=1,
     callbacks=wandb_callbacks  # ✅ 別忘了這一行！
 )
 
+# =========================================================
+# ❇️ 5️⃣-1：計算並記錄混淆矩陣 (❇️ 新增區塊)
+# =========================================================
+print("\n--- 正在計算驗證集的預測結果 (用於混淆矩陣)... ---")
+preds_val = model.predict(X_val)
+pred_action_probs, pred_point_probs, pred_server_probs = preds_val
+
+# 將 one-hot (y_val) 轉回類別
+true_action_labels = np.argmax(y_action_val, axis=1)
+true_point_labels = np.argmax(y_point_val, axis=1)
+true_server_labels = np.argmax(y_server_val, axis=1)
+
+# 將預測機率 (preds_val) 轉為類別
+pred_action_labels = np.argmax(pred_action_probs, axis=1)
+pred_point_labels = np.argmax(pred_point_probs, axis=1)
+pred_server_labels = np.argmax(pred_server_probs, axis=1)
+
+# 取得類別名稱 (用於 W&B 繪圖)
+action_classes = target_encoders['actionId'].classes_
+point_classes = target_encoders['pointId'].classes_
+server_classes = target_encoders['serverGetPoint'].classes_
+
+# --- 1. 記錄到 W&B (使用 wandb.plot.confusion_matrix) ---
+print("--- 正在記錄混淆矩陣至 W&B (wandb.plot)... ---")
+wandb.log({
+    "conf_mat_action": wandb.plot.confusion_matrix(
+        probs=None,
+        y_true=true_action_labels,
+        preds=pred_action_labels,
+        class_names=action_classes,
+        title="CM ActionID (Val)"
+    ),
+    "conf_mat_point": wandb.plot.confusion_matrix(
+        probs=None,
+        y_true=true_point_labels,
+        preds=pred_point_labels,
+        class_names=point_classes,
+        title="CM PointID (Val)"
+    ),
+    "conf_mat_server": wandb.plot.confusion_matrix(
+        probs=None,
+        y_true=true_server_labels,
+        preds=pred_server_labels,
+        class_names=server_classes,
+        title="CM ServerGetPoint (Val)"
+    )
+})
+
+# --- 2. 繪製熱圖 (Heatmap) 並記錄為圖片 (wandb.Image) ---
+# (這種圖在 W&B 報告中通常更清晰)
+print("--- 正在記錄混淆矩陣至 W&B (Seaborn Heatmap)... ---")
+
+def plot_cm_heatmap(cm, class_names, title):
+    """一個輔助函式，用 Seaborn 繪製熱圖"""
+    plt.figure(figsize=(12, 10))
+    # 檢查類別數量，如果太多，就不顯示 x/y 標籤，避免擁擠
+    show_ticks = len(class_names) <= 50 
+    
+    sns.heatmap(
+        cm, 
+        annot=True, # 顯示數字
+        fmt='d',    # 整數格式
+        cmap='Blues', 
+        xticklabels=class_names if show_ticks else False, 
+        yticklabels=class_names if show_ticks else False
+    )
+    plt.title(title, fontsize=16)
+    plt.ylabel('Actual (True Label)', fontsize=12)
+    plt.xlabel('Predicted (Model Label)', fontsize=12)
+    
+    plt.tight_layout()
+    # 傳回 plt 物件以便 W&B 記錄
+    return plt
+
+# 計算 Sklearn 的 CM
+cm_action = confusion_matrix(true_action_labels, pred_action_labels)
+cm_point = confusion_matrix(true_point_labels, pred_point_labels)
+cm_server = confusion_matrix(true_server_labels, pred_server_labels)
+
+# 繪製並記錄 ActionID
+plt_action = plot_cm_heatmap(cm_action, action_classes, "Heatmap - ActionID (Val)")
+wandb.log({"heatmap_action": wandb.Image(plt_action)})
+plt.close() # 關閉 plt 以免佔用記憶體
+
+# 繪製並記錄 PointID
+plt_point = plot_cm_heatmap(cm_point, point_classes, "Heatmap - PointID (Val)")
+wandb.log({"heatmap_point": wandb.Image(plt_point)})
+plt.close()
+
+# 繪製並記錄 ServerGetPoint
+plt_server = plot_cm_heatmap(cm_server, server_classes, "Heatmap - ServerGetPoint (Val)")
+wandb.log({"heatmap_server": wandb.Image(plt_server)})
+plt.close()
+
+print("--- 混淆矩陣記錄完畢 ---")
+
 
 # =========================================================
-# 5️⃣ 推論測試 與 顯示最終指標 (‼️ 已修正)
+# 5️⃣-2：推論測試 與 顯示最終指標 (‼️ 已修正)
 # =========================================================
 
 print("\n--- 推論測試 (範例) ---")
-preds = model.predict(X_val[:1])
-pred_action = np.argmax(preds[0], axis=1)[0]
-pred_point = np.argmax(preds[1], axis=1)[0]
-pred_server = np.argmax(preds[2], axis=1)[0]
+# (我們可以使用剛才計算 'preds_val' 的第一個樣本)
+pred_action = pred_action_labels[0]
+pred_point = pred_point_labels[0]
+pred_server = pred_server_labels[0]
 
 # 使用 target_encoders 來反解
 print("Predicted actionId:", target_encoders['actionId'].inverse_transform([pred_action])[0])
@@ -186,16 +332,17 @@ print("\n--- 最終模型評估 (Validation Set) ---")
 final_epoch_metrics = history.history
 
 # 提取 F1-Score
-# 注意：Keras 會自動加上 'val_' 前綴，以及輸出層的名稱 (e.g., 'val_actionId_f1_action')
+# 注意：Keras 會自動加上 'val_' 前缀，以及輸出層的名稱 (e.g., 'val_actionId_f1_action')
 f1_action = final_epoch_metrics['val_actionId_f1_action'][-1]
 f1_point = final_epoch_metrics['val_pointId_f1_point'][-1]
 print(f"Final Validation F1-Score (actionId): {f1_action:.4f}")
 print(f"Final Validation F1-Score (pointId):  {f1_point:.4f}")
 
 # KAUC
-# 注意：Keras 會自動加上 'val_' 前綴，以及輸出層的名稱 (e.g., 'val_serverGetPoint_auc_server')
+# 注意：Keras 會自動加上 'val_' 前缀，以及輸出層的名稱 (e.g., 'val_serverGetPoint_auc_server')
 auc_server = final_epoch_metrics['val_serverGetPoint_auc_server'][-1]
 print(f"Final Validation AUC (serverGetPoint): {auc_server:.4f}")
+print(f"Final Score: {(0.4 * f1_action + 0.4 * f1_point + 0.2 *auc_server):.4f}")
 
 wandb.summary["final_val_f1_action"] = f1_action
 wandb.summary["final_val_f1_point"] = f1_point
@@ -203,3 +350,22 @@ wandb.summary["final_val_auc_server"] = auc_server
 
 wandb.finish()
 
+print("\n--- 儲存模型與 Preprocessor ---")
+
+# 1. 儲存模型
+MODEL_SAVE_PATH = "my_lstm_model.keras"
+model.save(MODEL_SAVE_PATH)
+print(f"模型已儲存至: {MODEL_SAVE_PATH}")
+
+# 2. 儲存 Encoders 和 feature_cols 列表
+# (!! 關鍵：我們把訓練時最終使用的 feature_cols 列表一起存起來 !!)
+PREPROCESSOR_PATH = "preprocessor.pkl"
+data_to_save = {
+    'encoders': encoders,
+    'feature_cols': feature_cols  # <--- ❇️ 儲存這個重要的列表
+}
+with open(PREPROCESSOR_PATH, 'wb') as f:
+    pickle.dump(data_to_save, f)
+print(f"Encoders 和 feature_cols 已儲存至: {PREPROCESSOR_PATH}")
+
+print("儲存完畢，訓練腳本結束。")
