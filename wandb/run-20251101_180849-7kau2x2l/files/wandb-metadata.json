@@ -1,0 +1,28 @@
+{
+  "os": "Windows-10-10.0.26100-SP0",
+  "python": "CPython 3.11.5",
+  "startedAt": "2025-11-01T10:08:49.733205Z",
+  "program": "D:\\class\\資料科學\\main.py",
+  "codePath": "main.py",
+  "codePathLocal": "main.py",
+  "git": {
+    "remote": "https://github.com/tzuhsuan5684/TTMATCH",
+    "commit": "5fca77361177e50592247a55f7d5947ee2a0a218"
+  },
+  "email": "tzuhsuan5684@gmail.com",
+  "root": "D:\\class\\資料科學",
+  "host": "LAPTOP-4F2BAF37",
+  "executable": "C:\\Users\\user\\anaconda3\\python.exe",
+  "cpu_count": 4,
+  "cpu_count_logical": 8,
+  "disk": {
+    "/": {
+      "total": "500496855040",
+      "used": "207806910464"
+    }
+  },
+  "memory": {
+    "total": "16948453376"
+  },
+  "writerId": "e9qbbptixw76pczakw05wtxjzlgsgdwk"
+}

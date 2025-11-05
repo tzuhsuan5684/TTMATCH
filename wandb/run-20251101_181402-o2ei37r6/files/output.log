@@ -1,0 +1,56 @@
+[34m[1mwandb[0m: [33mWARNING[0m When using `save_best_only`, ensure that the `filepath` argument contains formatting placeholders like `{epoch:02d}` or `{batch:02d}`. This ensures correct interpretation of the logged artifacts.
+Epoch 1/20
+[1m1174/1174[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m20s[0m 14ms/step - actionId_accuracy: 0.3126 - actionId_f1_action: 0.1420 - actionId_loss: 2.0915 - loss: 4.7152 - pointId_accuracy: 0.2485 - pointId_f1_point: 0.1329 - pointId_loss: 2.0279 - serverGetPoint_accuracy: 0.6552 - serverGetPoint_auc_server: 0.7304 - serverGetPoint_loss: 0.5960 - val_actionId_accuracy: 0.3411 - val_actionId_f1_action: 0.1514 - val_actionId_loss: 1.9647 - val_loss: 4.4691 - val_pointId_accuracy: 0.2741 - val_pointId_f1_point: 0.1327 - val_pointId_loss: 1.9650 - val_serverGetPoint_accuracy: 0.7028 - val_serverGetPoint_auc_server: 0.7912 - val_serverGetPoint_loss: 0.5398
+Epoch 2/20
+[1m1174/1174[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m15s[0m 13ms/step - actionId_accuracy: 0.3417 - actionId_f1_action: 0.1674 - actionId_loss: 1.9597 - loss: 4.4598 - pointId_accuracy: 0.2713 - pointId_f1_point: 0.1417 - pointId_loss: 1.9702 - serverGetPoint_accuracy: 0.7086 - serverGetPoint_auc_server: 0.7984 - serverGetPoint_loss: 0.5299 - val_actionId_accuracy: 0.3571 - val_actionId_f1_action: 0.1753 - val_actionId_loss: 1.9186 - val_loss: 4.3850 - val_pointId_accuracy: 0.2802 - val_pointId_f1_point: 0.1515 - val_pointId_loss: 1.9458 - val_serverGetPoint_accuracy: 0.7158 - val_serverGetPoint_auc_server: 0.8072 - val_serverGetPoint_loss: 0.5214
+Epoch 3/20
+[1m1174/1174[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m16s[0m 13ms/step - actionId_accuracy: 0.3539 - actionId_f1_action: 0.1782 - actionId_loss: 1.9147 - loss: 4.3662 - pointId_accuracy: 0.2800 - pointId_f1_point: 0.1477 - pointId_loss: 1.9472 - serverGetPoint_accuracy: 0.7245 - serverGetPoint_auc_server: 0.8189 - serverGetPoint_loss: 0.5041 - val_actionId_accuracy: 0.3631 - val_actionId_f1_action: 0.1816 - val_actionId_loss: 1.8839 - val_loss: 4.3040 - val_pointId_accuracy: 0.2865 - val_pointId_f1_point: 0.1462 - val_pointId_loss: 1.9276 - val_serverGetPoint_accuracy: 0.7362 - val_serverGetPoint_auc_server: 0.8330 - val_serverGetPoint_loss: 0.4928
+Epoch 4/20
+[1m1174/1174[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m20s[0m 17ms/step - actionId_accuracy: 0.3639 - actionId_f1_action: 0.1875 - actionId_loss: 1.8856 - loss: 4.3086 - pointId_accuracy: 0.2846 - pointId_f1_point: 0.1513 - pointId_loss: 1.9330 - serverGetPoint_accuracy: 0.7333 - serverGetPoint_auc_server: 0.8295 - serverGetPoint_loss: 0.4903 - val_actionId_accuracy: 0.3715 - val_actionId_f1_action: 0.1885 - val_actionId_loss: 1.8591 - val_loss: 4.2547 - val_pointId_accuracy: 0.2896 - val_pointId_f1_point: 0.1451 - val_pointId_loss: 1.9174 - val_serverGetPoint_accuracy: 0.7392 - val_serverGetPoint_auc_server: 0.8383 - val_serverGetPoint_loss: 0.4787
+Epoch 5/20
+[1m1174/1174[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m19s[0m 16ms/step - actionId_accuracy: 0.3673 - actionId_f1_action: 0.1898 - actionId_loss: 1.8654 - loss: 4.2659 - pointId_accuracy: 0.2876 - pointId_f1_point: 0.1552 - pointId_loss: 1.9229 - serverGetPoint_accuracy: 0.7411 - serverGetPoint_auc_server: 0.8387 - serverGetPoint_loss: 0.4776 - val_actionId_accuracy: 0.3756 - val_actionId_f1_action: 0.1918 - val_actionId_loss: 1.8511 - val_loss: 4.2381 - val_pointId_accuracy: 0.2896 - val_pointId_f1_point: 0.1400 - val_pointId_loss: 1.9164 - val_serverGetPoint_accuracy: 0.7416 - val_serverGetPoint_auc_server: 0.8425 - val_serverGetPoint_loss: 0.4715
+Epoch 6/20
+[1m1174/1174[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m17s[0m 15ms/step - actionId_accuracy: 0.3736 - actionId_f1_action: 0.1952 - actionId_loss: 1.8466 - loss: 4.2301 - pointId_accuracy: 0.2898 - pointId_f1_point: 0.1590 - pointId_loss: 1.9125 - serverGetPoint_accuracy: 0.7468 - serverGetPoint_auc_server: 0.8440 - serverGetPoint_loss: 0.4711 - val_actionId_accuracy: 0.3784 - val_actionId_f1_action: 0.1937 - val_actionId_loss: 1.8285 - val_loss: 4.1979 - val_pointId_accuracy: 0.2927 - val_pointId_f1_point: 0.1533 - val_pointId_loss: 1.9059 - val_serverGetPoint_accuracy: 0.7485 - val_serverGetPoint_auc_server: 0.8475 - val_serverGetPoint_loss: 0.4640
+Epoch 7/20
+[1m 544/1174[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m5s[0m 8ms/step - actionId_accuracy: 0.3760 - actionId_f1_action: 0.2015 - actionId_loss: 1.8331 - loss: 4.2126 - pointId_accuracy: 0.2944 - pointId_f1_point: 0.1600 - pointId_loss: 1.9080 - serverGetPoint_accuracy: 0.7438 - serverGetPoint_auc_server: 0.8425 - serverGetPoint_loss: 0.4715
+Traceback (most recent call last):
+  File "D:\class\資料科學\main.py", line 164, in <module>
+    verbose=1,
+          ^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\keras\src\utils\traceback_utils.py", line 117, in error_handler
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\keras\src\backend\tensorflow\trainer.py", line 399, in fit
+    logs = self.train_function(iterator)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\keras\src\backend\tensorflow\trainer.py", line 241, in function
+    opt_outputs = multi_step_on_iterator(iterator)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\tensorflow\python\util\traceback_utils.py", line 150, in error_handler
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\tensorflow\python\eager\polymorphic_function\polymorphic_function.py", line 833, in __call__
+    result = self._call(*args, **kwds)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\tensorflow\python\eager\polymorphic_function\polymorphic_function.py", line 878, in _call
+    results = tracing_compilation.call_function(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\tensorflow\python\eager\polymorphic_function\tracing_compilation.py", line 139, in call_function
+    return function._call_flat(  # pylint: disable=protected-access
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\tensorflow\python\eager\polymorphic_function\concrete_function.py", line 1322, in _call_flat
+    return self._inference_function.call_preflattened(args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\tensorflow\python\eager\polymorphic_function\atomic_function.py", line 216, in call_preflattened
+    flat_outputs = self.call_flat(*args)
+                   ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\tensorflow\python\eager\polymorphic_function\atomic_function.py", line 251, in call_flat
+    outputs = self._bound_context.call_function(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\tensorflow\python\eager\context.py", line 1688, in call_function
+    outputs = execute.execute(
+              ^^^^^^^^^^^^^^^^
+  File "C:\Users\user\anaconda3\Lib\site-packages\tensorflow\python\eager\execute.py", line 53, in quick_execute
+    tensors = pywrap_tfe.TFE_Py_Execute(ctx._handle, device_name, op_name,
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
