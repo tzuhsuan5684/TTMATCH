@@ -4,6 +4,7 @@ import xgboost as xgb
 from sklearn.model_selection import RandomizedSearchCV, PredefinedSplit
 from sklearn.metrics import f1_score, roc_auc_score, confusion_matrix
 from sklearn.feature_selection import VarianceThreshold
+from sklearn.utils.class_weight import compute_class_weight
 from sklearn.utils.class_weight import compute_sample_weight
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
@@ -13,6 +14,19 @@ from datetime import datetime
 import json
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+def plot_confusion_matrix(y_true, y_pred, class_labels, filename, title='Confusion matrix'):
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(14, 12))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=class_labels, yticklabels=class_labels)
+    plt.title(title, fontsize=16)
+    plt.ylabel('True Label', fontsize=12)
+    plt.xlabel('Predicted Label', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+
 
 def train_binary_xgb(name, X, y, X_valid, y_valid):
     model=xgb.XGBClassifier(
@@ -26,10 +40,19 @@ def train_binary_xgb(name, X, y, X_valid, y_valid):
     y_server_pred = model.predict(X_valid)
 
     score=roc_auc_score(y_valid, y_server_pred)
+    plot_confusion_matrix(y_valid, y_server_pred, class_labels=[0, 1],
+                          filename=f'confusion_matrix_{name}.png',
+                          title=f'Confusion Matrix for {name}')
     print(f"Validation ROC AUC Score for {name}: {score:.4f}")
+
     return model, score
 
 def trainXGB(name, X, y, X_valid, y_valid, objective='multi:softmax'):
+    classes = np.unique(y)
+    class_weights = compute_class_weight('balanced', classes=classes, y=y)
+    class_weight_dict = dict(zip(classes, class_weights))
+    sample_weights = y.map(class_weight_dict)
+
     model=xgb.XGBClassifier(
         objective=objective,
         eval_metric='mlogloss',
@@ -38,10 +61,13 @@ def trainXGB(name, X, y, X_valid, y_valid, objective='multi:softmax'):
         random_state=42
     )
 
-    model.fit(X, y)
+    model.fit(X, y, sample_weight=sample_weights)
     y_pred = model.predict(X_valid)
     f1 = f1_score(y_valid, y_pred, average='weighted')
     print(f"Validation F1 Score for {name}: {f1:.4f}")
+    plot_confusion_matrix(y_valid, y_pred, class_labels=sorted(y.unique()),
+                          filename=f'confusion_matrix_{name}.png',
+                          title=f'Confusion Matrix for {name}')
     return model, f1
 
 def main():
@@ -98,6 +124,8 @@ def main():
     model_server, roc_server = train_binary_xgb('serverGetPoint', X_train, y_server_train, X_valid, y_server_valid)
     
     print(f"Validation score: {0.4*f1_action + 0.4*f1_point + 0.2*roc_server:.4f}")
+
+    
 
     # test predictions
     X_test_raw = test_new.drop(columns=["rally_uid", "rally_id", "match", "numberGame"])
