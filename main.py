@@ -89,6 +89,13 @@ def main():
             train_new[f'prev_{n}_{col}'] = train_new.groupby('rally_uid')[col].shift(n)
             test_new[f'prev_{n}_{col}'] = test_new.groupby('rally_uid')[col].shift(n)
 
+    n_train = train_new.shape[0]
+    combined = pd.concat([train_new, test_new], ignore_index=True)
+    combined = pd.get_dummies(combined, columns =['sex', 'strickId'], prefix=['sex', 'strick'])
+
+    train_new = combined.iloc[:n_train]
+    test_new = combined.iloc[n_train:]
+
     #preprocessing
     target_cols = ["actionId", "pointId", "serverGetPoint"]
     drop_cols = ["rally_uid", "rally_id", "match", "numberGame", "serverGetPoint"]
@@ -125,10 +132,8 @@ def main():
     
     print(f"Validation score: {0.4*f1_action + 0.4*f1_point + 0.2*roc_server:.4f}")
 
-    
-
     # test predictions
-    X_test_raw = test_new.drop(columns=["rally_uid", "rally_id", "match", "numberGame"])
+    X_test_raw = test_new.drop(columns=["rally_uid", "rally_id", "match", "numberGame", "serverGetPoint"])
     last_shot_indices = test_new.groupby('rally_uid').tail(1).index
     X_test = X_test_raw.loc[last_shot_indices]
     
