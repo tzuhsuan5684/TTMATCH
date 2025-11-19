@@ -1,4 +1,4 @@
-# Badminton Rally Prediction — LightGBM Pipeline
+# Table Tennis Rally Prediction — LightGBM Pipeline
 
 針對桌球回合同步預測三個目標變數，使用 LightGBM 建立多模型 pipeline，並產出可直接提交的 `submission.csv`。
 
